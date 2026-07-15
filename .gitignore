@@ -12,7 +12,17 @@ dist
 dist-ssr
 dev-dist
 *.local
+.env
+.env.*
+!.env.example
 .DS_Store
+
+# Capacitor / iOS
+ios/App/Pods
+ios/App/App/public
+ios/DerivedData
+*.xcuserstate
+xcuserdata/
 
 # Editor directories and files
 .vscode/*

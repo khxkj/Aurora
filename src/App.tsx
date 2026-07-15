@@ -16,6 +16,7 @@ import { SavedCities } from './components/SavedCities'
 import { SearchBar } from './components/SearchBar'
 import { TempChart } from './components/TempChart'
 import { WorldStrip, type WorldCitySnap } from './components/WorldStrip'
+import { WeatherAI } from './components/WeatherAI'
 import { PwaPrompts } from './components/PwaPrompts'
 import {
   loadLastLocation,
@@ -309,6 +310,7 @@ export default function App() {
               </div>
             </div>
             <DetailGrid data={data} tempUnit={tempUnit} windUnit={windUnit} />
+            <WeatherAI data={data} tempUnit={tempUnit} windUnit={windUnit} />
             <WorldStrip
               cities={world}
               tempUnit={tempUnit}

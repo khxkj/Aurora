@@ -7,9 +7,18 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "build:ios": "tsc -b && vite build && npx cap sync ios",
+    "open:ios": "npx cap open ios",
+    "ios": "npm run build:ios && npx cap open ios"
   },
   "dependencies": {
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/cli": "^8.4.2",
+    "@capacitor/core": "^8.4.2",
+    "@capacitor/geolocation": "^8.2.0",
+    "@capacitor/ios": "^8.4.2",
+    "@capacitor/status-bar": "^8.0.3",
     "date-fns": "^4.4.0",
     "framer-motion": "^12.42.2",
     "lucide-react": "^1.24.0",
