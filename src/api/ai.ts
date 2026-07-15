@@ -2,15 +2,27 @@ import type { TempUnit, WeatherBundle, WindUnit } from '../types/weather'
 import { getWeatherMeta } from '../lib/weatherCodes'
 import { formatTemp, formatWind } from '../lib/units'
 
-/** Cheap, fast chat model — keep max_tokens low to minimize cost */
-export const AI_MODEL = 'grok-4-1-fast-non-reasoning'
-const FALLBACK_MODEL = 'grok-4.5'
-const MAX_OUTPUT_TOKENS = 140
-const API_URL = 'https://api.x.ai/v1/chat/completions'
-
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
+}
+
+/**
+ * Shared AI endpoint:
+ * - Production / iOS: VITE_AI_PROXY_URL (Cloudflare Worker holding your key)
+ * - Local dev: /api/ask (Vite middleware + .env XAI_API_KEY)
+ */
+export function getAiEndpoint(): string {
+  const fromEnv = (import.meta.env.VITE_AI_PROXY_URL as string | undefined)?.trim()
+  if (fromEnv) return fromEnv.replace(/\/$/, '')
+  // Vite dev middleware (see vite.config.ts)
+  const base = import.meta.env.BASE_URL || '/'
+  return `${base}api/ask`.replace(/\/{2,}/g, '/').replace(':/', '://')
+}
+
+export function isSharedAiConfigured(): boolean {
+  return Boolean((import.meta.env.VITE_AI_PROXY_URL as string | undefined)?.trim()) ||
+    import.meta.env.DEV === true
 }
 
 /** Tiny weather snapshot so the model has facts without burning tokens */
@@ -52,78 +64,40 @@ export function buildWeatherContext(
   ].join('\n')
 }
 
-const SYSTEM = `You are AURORA, a brief weather helper.
-Rules: use ONLY the weather data block; answer the user's question; max ~55 words; plain language; no markdown tables; if data is missing say so.`
-
 export async function askWeatherAI(opts: {
-  apiKey: string
   weatherContext: string
   question: string
   history?: ChatMessage[]
 }): Promise<string> {
-  const { apiKey, weatherContext, question, history = [] } = opts
+  const { weatherContext, question, history = [] } = opts
+  const endpoint = getAiEndpoint()
 
-  // Keep history tiny (last 2 turns) to stay low-token
-  const prior = history
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-4)
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      question: question.slice(0, 280),
+      weatherContext: weatherContext.slice(0, 1200),
+      history: history
+        .filter((m) => m.role === 'user' || m.role === 'assistant')
+        .slice(-4)
+        .map((m) => ({ role: m.role, content: m.content.slice(0, 400) })),
+    }),
+  })
 
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM },
-    {
-      role: 'user',
-      content: `WEATHER DATA:\n${weatherContext}\n\nQuestion: ${question.slice(0, 280)}`,
-    },
-  ]
-
-  // If there's prior context, put short history before the data question
-  if (prior.length > 0) {
-    messages.splice(1, 0, ...prior)
-  }
-
-  async function call(model: string): Promise<string> {
-    const res = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.35,
-        max_tokens: MAX_OUTPUT_TOKENS,
-      }),
-    })
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => '')
-      let msg = `AI request failed (${res.status})`
-      try {
-        const j = JSON.parse(errText) as { error?: { message?: string } }
-        if (j.error?.message) msg = j.error.message
-      } catch {
-        if (errText) msg = errText.slice(0, 160)
-      }
-      throw new Error(msg)
-    }
-
-    const data = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>
-    }
-    const text = data.choices?.[0]?.message?.content?.trim()
-    if (!text) throw new Error('Empty AI response')
-    return text
-  }
-
+  const raw = await res.text()
+  let data: { answer?: string; error?: string } = {}
   try {
-    return await call(AI_MODEL)
-  } catch (e) {
-    // Fall back if fast model id isn't available on this account
-    const msg = e instanceof Error ? e.message : ''
-    if (/model|not found|invalid/i.test(msg) || /404|400/.test(msg)) {
-      return await call(FALLBACK_MODEL)
-    }
-    throw e
+    data = JSON.parse(raw) as { answer?: string; error?: string }
+  } catch {
+    /* non-json */
   }
+
+  if (!res.ok) {
+    throw new Error(data.error || raw.slice(0, 160) || `AI request failed (${res.status})`)
+  }
+  if (!data.answer?.trim()) {
+    throw new Error(data.error || 'Empty AI response')
+  }
+  return data.answer.trim()
 }

@@ -1,10 +1,13 @@
 import { useMemo, useRef, useState } from 'react'
 import { motion } from 'framer-motion'
-import { KeyRound, Loader2, Send, Sparkles, Trash2 } from 'lucide-react'
-import { askWeatherAI, buildWeatherContext, type ChatMessage } from '../api/ai'
+import { Loader2, Send, Sparkles, Trash2 } from 'lucide-react'
+import {
+  askWeatherAI,
+  buildWeatherContext,
+  isSharedAiConfigured,
+  type ChatMessage,
+} from '../api/ai'
 import type { TempUnit, WeatherBundle, WindUnit } from '../types/weather'
-
-const KEY_STORAGE = 'aurora.xaiApiKey'
 
 const SUGGESTIONS = [
   'What should I wear today?',
@@ -14,14 +17,6 @@ const SUGGESTIONS = [
   'UV and air quality tips?',
 ]
 
-function loadKey(): string {
-  try {
-    return localStorage.getItem(KEY_STORAGE) ?? ''
-  } catch {
-    return ''
-  }
-}
-
 interface Props {
   data: WeatherBundle
   tempUnit: TempUnit
@@ -29,38 +24,21 @@ interface Props {
 }
 
 export function WeatherAI({ data, tempUnit, windUnit }: Props) {
-  const [apiKey, setApiKey] = useState(loadKey)
-  const [showKey, setShowKey] = useState(!loadKey())
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const listRef = useRef<HTMLDivElement>(null)
+  const sharedReady = isSharedAiConfigured()
 
   const context = useMemo(
     () => buildWeatherContext(data, tempUnit, windUnit),
     [data, tempUnit, windUnit],
   )
 
-  const saveKey = (key: string) => {
-    const trimmed = key.trim()
-    setApiKey(trimmed)
-    try {
-      if (trimmed) localStorage.setItem(KEY_STORAGE, trimmed)
-      else localStorage.removeItem(KEY_STORAGE)
-    } catch {
-      /* ignore */
-    }
-  }
-
   const ask = async (question: string) => {
     const q = question.trim()
     if (!q || busy) return
-    if (!apiKey.trim()) {
-      setShowKey(true)
-      setError('Add your xAI API key to use the weather assistant.')
-      return
-    }
 
     setError(null)
     setBusy(true)
@@ -70,7 +48,6 @@ export function WeatherAI({ data, tempUnit, windUnit }: Props) {
 
     try {
       const answer = await askWeatherAI({
-        apiKey: apiKey.trim(),
         weatherContext: context,
         question: q,
         history: messages,
@@ -81,7 +58,6 @@ export function WeatherAI({ data, tempUnit, windUnit }: Props) {
       })
     } catch (e) {
       setError(e instanceof Error ? e.message : 'AI request failed')
-      // roll back user bubble on hard fail? keep it so they can retry
     } finally {
       setBusy(false)
     }
@@ -109,70 +85,31 @@ export function WeatherAI({ data, tempUnit, windUnit }: Props) {
               Ask AURORA
             </h2>
             <p className="text-[11px] text-white/40">
-              Low-token weather tips · grounded in live forecast
+              Free for everyone · powered by live forecast · short smart answers
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-1.5">
+        {messages.length > 0 && (
           <button
             type="button"
-            onClick={() => setShowKey((v) => !v)}
-            className="inline-flex items-center gap-1 rounded-xl bg-white/8 px-2.5 py-1.5 text-[11px] font-medium text-white/70 transition hover:bg-white/12"
+            onClick={() => {
+              setMessages([])
+              setError(null)
+            }}
+            className="rounded-xl bg-white/8 p-1.5 text-white/50 transition hover:bg-white/12 hover:text-white"
+            aria-label="Clear chat"
           >
-            <KeyRound size={12} />
-            {apiKey ? 'Key saved' : 'API key'}
+            <Trash2 size={14} />
           </button>
-          {messages.length > 0 && (
-            <button
-              type="button"
-              onClick={() => {
-                setMessages([])
-                setError(null)
-              }}
-              className="rounded-xl bg-white/8 p-1.5 text-white/50 transition hover:bg-white/12 hover:text-white"
-              aria-label="Clear chat"
-            >
-              <Trash2 size={14} />
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
-      {showKey && (
-        <div className="mb-3 rounded-2xl border border-white/10 bg-black/25 p-3">
-          <p className="text-[11px] leading-relaxed text-white/50">
-            Get a free key at{' '}
-            <a
-              href="https://console.x.ai"
-              target="_blank"
-              rel="noreferrer"
-              className="text-cyan-300/90 underline-offset-2 hover:underline"
-            >
-              console.x.ai
-            </a>
-            . Stored only on this device — never uploaded to GitHub. Uses a cheap fast model with
-            short answers (~pennies per chat).
-          </p>
-          <div className="mt-2 flex gap-2">
-            <input
-              type="password"
-              value={apiKey}
-              onChange={(e) => saveKey(e.target.value)}
-              placeholder="xai-..."
-              className="min-w-0 flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-white outline-none placeholder:text-white/30 focus:border-cyan-400/40"
-              autoComplete="off"
-              spellCheck={false}
-            />
-            <button
-              type="button"
-              onClick={() => setShowKey(false)}
-              disabled={!apiKey.trim()}
-              className="rounded-xl bg-white/12 px-3 py-2 text-xs font-semibold text-white transition hover:bg-white/18 disabled:opacity-40"
-            >
-              Done
-            </button>
-          </div>
-        </div>
+      {!sharedReady && (
+        <p className="mb-3 rounded-2xl border border-amber-400/25 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-100/90">
+          Shared AI is not configured on this build yet. Owner: deploy the proxy in{' '}
+          <code className="text-amber-50/80">proxy/</code> and set{' '}
+          <code className="text-amber-50/80">VITE_AI_PROXY_URL</code> (see proxy/README.md).
+        </p>
       )}
 
       {messages.length === 0 && (

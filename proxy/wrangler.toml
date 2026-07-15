@@ -1,0 +1,10 @@
+name = "aurora-ai"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# After deploy, set your secret (never commit the key):
+#   npx wrangler secret put XAI_API_KEY
+#
+# Optional: tighten who can call the proxy
+# [vars]
+# ALLOWED_ORIGINS = "https://khxkj.github.io,capacitor://localhost,http://localhost:5173"
