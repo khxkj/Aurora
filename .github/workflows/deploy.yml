@@ -34,8 +34,8 @@ jobs:
         env:
           # Project site URL: https://USER.github.io/REPO/
           BASE_PATH: /${{ github.event.repository.name }}/
-          # Shared AI proxy (Cloudflare Worker). Set in repo Secrets as VITE_AI_PROXY_URL
-          VITE_AI_PROXY_URL: ${{ secrets.VITE_AI_PROXY_URL }}
+          # Shared AI proxy (public Worker URL — secret XAI key lives only on Cloudflare)
+          VITE_AI_PROXY_URL: https://aurora-ai.aurora-khxkj.workers.dev
         run: npm run build
 
       - name: Upload Pages artifact
