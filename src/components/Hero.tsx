@@ -24,9 +24,9 @@ export function Hero({ data, tempUnit, windUnit }: Props) {
 
   return (
     <motion.section
-      initial={{ opacity: 0, y: 24 }}
+      initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.55, ease: [0.22, 1, 0.36, 1] }}
+      transition={{ duration: 0.28, ease: 'easeOut' }}
       className="relative"
     >
       <div className="mb-2 flex flex-wrap items-end justify-between gap-3">

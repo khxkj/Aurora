@@ -22,7 +22,7 @@ export function DailyForecast({ data, tempUnit }: Props) {
       transition={{ delay: 0.15, duration: 0.5 }}
       className="glass rounded-3xl p-4 sm:p-5"
     >
-      <h2 className="mb-4 text-sm font-semibold tracking-wide text-white/90">10-day outlook</h2>
+      <h2 className="mb-4 text-sm font-semibold tracking-wide text-white/90">7-day outlook</h2>
       <div className="flex flex-col gap-1">
         {daily.time.map((day, i) => {
           const d = new Date(day + 'T12:00:00')

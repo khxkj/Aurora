@@ -103,7 +103,7 @@ export async function fetchWeather(location: GeoLocation): Promise<WeatherBundle
       'wind_speed_10m_max',
       'wind_gusts_10m_max',
     ].join(','),
-    forecast_days: '10',
+    forecast_days: '7',
     wind_speed_unit: 'kmh',
   })
 
@@ -188,31 +188,101 @@ export const WORLD_CITIES: GeoLocation[] = [
   { id: 993800, name: 'Cape Town', latitude: -33.93, longitude: 18.42, country: 'South Africa', country_code: 'ZA', timezone: 'Africa/Johannesburg' },
 ]
 
+/** Lightweight current-only fetch (saved city chips) */
+export async function fetchCurrentSnapshot(
+  location: Pick<GeoLocation, 'latitude' | 'longitude'>,
+): Promise<{ temp: number; code: number; isDay: number }> {
+  const params = new URLSearchParams({
+    latitude: String(location.latitude),
+    longitude: String(location.longitude),
+    current: 'temperature_2m,weather_code,is_day',
+  })
+  const res = await fetch(`${WEATHER_URL}?${params}`)
+  if (!res.ok) throw new Error('snapshot failed')
+  const data = await res.json()
+  return {
+    temp: data.current.temperature_2m as number,
+    code: data.current.weather_code as number,
+    isDay: data.current.is_day as number,
+  }
+}
+
+/**
+ * One batched Open-Meteo request for all world cities (was 12 parallel requests).
+ * Open-Meteo accepts comma-separated lat/lon lists.
+ */
 export async function fetchWorldSnapshot(): Promise<
   Array<{ location: GeoLocation; temp: number; code: number; isDay: number }>
 > {
-  const results = await Promise.all(
-    WORLD_CITIES.map(async (loc) => {
-      try {
-        const params = new URLSearchParams({
-          latitude: String(loc.latitude),
-          longitude: String(loc.longitude),
-          current: 'temperature_2m,weather_code,is_day',
-          timezone: 'auto',
-        })
-        const res = await fetch(`${WEATHER_URL}?${params}`)
-        if (!res.ok) throw new Error('fail')
-        const data = await res.json()
-        return {
-          location: loc,
-          temp: data.current.temperature_2m as number,
-          code: data.current.weather_code as number,
-          isDay: data.current.is_day as number,
-        }
-      } catch {
-        return { location: loc, temp: NaN, code: 0, isDay: 1 }
-      }
-    }),
-  )
-  return results
+  try {
+    const params = new URLSearchParams({
+      latitude: WORLD_CITIES.map((c) => c.latitude).join(','),
+      longitude: WORLD_CITIES.map((c) => c.longitude).join(','),
+      current: 'temperature_2m,weather_code,is_day',
+    })
+    const res = await fetch(`${WEATHER_URL}?${params}`)
+    if (!res.ok) throw new Error('world fail')
+    const data = await res.json()
+
+    // Multi-location: arrays of current objects, or single if one city
+    const currents = Array.isArray(data)
+      ? data.map((d: { current: { temperature_2m: number; weather_code: number; is_day: number } }) => d.current)
+      : Array.isArray(data.current?.time)
+        ? // alternate multi format
+          (data.current.temperature_2m as number[]).map((temp: number, i: number) => ({
+            temperature_2m: temp,
+            weather_code: data.current.weather_code[i],
+            is_day: data.current.is_day[i],
+          }))
+        : null
+
+    if (Array.isArray(data) && data.length === WORLD_CITIES.length) {
+      return WORLD_CITIES.map((location, i) => ({
+        location,
+        temp: data[i]?.current?.temperature_2m ?? NaN,
+        code: data[i]?.current?.weather_code ?? 0,
+        isDay: data[i]?.current?.is_day ?? 1,
+      }))
+    }
+
+    // Fallback: documented multi-location returns parallel arrays under current
+    if (
+      data.current &&
+      Array.isArray(data.current.temperature_2m) &&
+      data.current.temperature_2m.length === WORLD_CITIES.length
+    ) {
+      return WORLD_CITIES.map((location, i) => ({
+        location,
+        temp: data.current.temperature_2m[i] as number,
+        code: data.current.weather_code[i] as number,
+        isDay: data.current.is_day[i] as number,
+      }))
+    }
+
+    // Last resort: small concurrent batch (max 4 at a time) if batch shape unexpected
+    void currents
+    const out: Array<{ location: GeoLocation; temp: number; code: number; isDay: number }> = []
+    for (let i = 0; i < WORLD_CITIES.length; i += 4) {
+      const chunk = WORLD_CITIES.slice(i, i + 4)
+      const part = await Promise.all(
+        chunk.map(async (loc) => {
+          try {
+            const s = await fetchCurrentSnapshot(loc)
+            return { location: loc, ...s }
+          } catch {
+            return { location: loc, temp: NaN, code: 0, isDay: 1 }
+          }
+        }),
+      )
+      out.push(...part)
+    }
+    return out
+  } catch {
+    return WORLD_CITIES.map((location) => ({
+      location,
+      temp: NaN,
+      code: 0,
+      isDay: 1,
+    }))
+  }
 }

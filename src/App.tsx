@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  fetchCurrentSnapshot,
   fetchWeather,
   fetchWorldSnapshot,
   reverseGeocode,
@@ -14,24 +15,35 @@ import { Hero } from './components/Hero'
 import { HourlyStrip } from './components/HourlyStrip'
 import { SavedCities } from './components/SavedCities'
 import { SearchBar } from './components/SearchBar'
-import { TempChart } from './components/TempChart'
-import { WorldStrip, type WorldCitySnap } from './components/WorldStrip'
-import { WeatherAI } from './components/WeatherAI'
 import { PwaPrompts } from './components/PwaPrompts'
 import {
   loadLastLocation,
   loadSavedCities,
   loadTempUnit,
+  loadWeatherCache,
   loadWindUnit,
   saveLastLocation,
   saveSavedCities,
   saveTempUnit,
+  saveWeatherCache,
   saveWindUnit,
 } from './lib/storage'
 import { getWeatherMeta } from './lib/weatherCodes'
 import type { GeoLocation, SavedCity, TempUnit, WeatherBundle, WindUnit } from './types/weather'
+import type { WorldCitySnap } from './components/WorldStrip'
 
-const DEFAULT_CITY: GeoLocation = WORLD_CITIES[1] // London as friendly default
+// Heavy chunks — load after first paint
+const TempChart = lazy(() =>
+  import('./components/TempChart').then((m) => ({ default: m.TempChart })),
+)
+const WeatherAI = lazy(() =>
+  import('./components/WeatherAI').then((m) => ({ default: m.WeatherAI })),
+)
+const WorldStrip = lazy(() =>
+  import('./components/WorldStrip').then((m) => ({ default: m.WorldStrip })),
+)
+
+const DEFAULT_CITY: GeoLocation = WORLD_CITIES[1]
 
 function toSaved(loc: GeoLocation): SavedCity {
   return {
@@ -44,9 +56,19 @@ function toSaved(loc: GeoLocation): SavedCity {
   }
 }
 
+function scheduleIdle(fn: () => void, timeout = 1200): () => void {
+  if (typeof window !== 'undefined' && typeof window.requestIdleCallback === 'function') {
+    const id = window.requestIdleCallback(() => fn(), { timeout })
+    return () => window.cancelIdleCallback(id)
+  }
+  const t = globalThis.setTimeout(fn, 400)
+  return () => globalThis.clearTimeout(t)
+}
+
 export default function App() {
-  const [data, setData] = useState<WeatherBundle | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Instant UI from cache when available
+  const [data, setData] = useState<WeatherBundle | null>(() => loadWeatherCache())
+  const [loading, setLoading] = useState(() => !loadWeatherCache())
   const [refreshing, setRefreshing] = useState(false)
   const [locating, setLocating] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -55,15 +77,21 @@ export default function App() {
   const [saved, setSaved] = useState<SavedCity[]>(() => loadSavedCities())
   const [savedTemps, setSavedTemps] = useState<Record<number, number>>({})
   const [world, setWorld] = useState<WorldCitySnap[]>([])
+  const [extrasReady, setExtrasReady] = useState(false)
+  const hasDataRef = useRef(!!data)
+  hasDataRef.current = !!data
 
   const loadLocation = useCallback(async (loc: GeoLocation, opts?: { silent?: boolean }) => {
-    if (!opts?.silent) setLoading(true)
-    else setRefreshing(true)
+    // Keep showing previous/cache data while refreshing to avoid blank freeze
+    if (opts?.silent || hasDataRef.current) setRefreshing(true)
+    else setLoading(true)
     setError(null)
     try {
       const bundle = await fetchWeather(loc)
       setData(bundle)
+      hasDataRef.current = true
       saveLastLocation(toSaved(bundle.location))
+      saveWeatherCache(bundle)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to load weather')
     } finally {
@@ -72,119 +100,179 @@ export default function App() {
     }
   }, [])
 
-  // Initial load: last location → geolocation → default
-  // Also honors PWA shortcut ?near=1
+  // Boot: paint cache → refresh last city ASAP (no geo wait unless no last city)
   useEffect(() => {
     let cancelled = false
 
     async function boot() {
       const params = new URLSearchParams(window.location.search)
       const wantNear = params.get('near') === '1'
-
-      if (wantNear && 'geolocation' in navigator) {
-        setLocating(true)
-        try {
-          const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
-            navigator.geolocation.getCurrentPosition(resolve, reject, {
-              enableHighAccuracy: true,
-              timeout: 12000,
-            })
-          })
-          if (cancelled) return
-          const geo = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
-          if (geo && !cancelled) {
-            await loadLocation(geo)
-            setLocating(false)
-            window.history.replaceState({}, '', '/')
-            return
-          }
-        } catch {
-          /* fall through to normal boot */
-        }
-        if (!cancelled) setLocating(false)
-      }
-
       const last = loadLastLocation()
-      if (last) {
-        if (!cancelled) await loadLocation(last)
+      const cached = loadWeatherCache()
+
+      // Fast path: we know the city — refresh in background without blocking UI
+      if (last && !wantNear) {
+        if (cached) {
+          setData(cached)
+          setLoading(false)
+        }
+        if (!cancelled) await loadLocation(last, { silent: !!cached })
         return
       }
 
-      if ('geolocation' in navigator) {
+      if (wantNear && 'geolocation' in navigator) {
         setLocating(true)
+        // Show cache or default city immediately while GPS runs
+        if (cached && !cancelled) {
+          setData(cached)
+          setLoading(false)
+        } else if (!cancelled) {
+          void loadLocation(DEFAULT_CITY, { silent: false })
+        }
         try {
           const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
             navigator.geolocation.getCurrentPosition(resolve, reject, {
               enableHighAccuracy: false,
-              timeout: 8000,
-              maximumAge: 300_000,
+              timeout: 5000,
+              maximumAge: 120_000,
             })
           })
           if (cancelled) return
           const geo = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
           if (geo && !cancelled) {
-            await loadLocation(geo)
-            setLocating(false)
-            return
+            await loadLocation(geo, { silent: true })
+            window.history.replaceState({}, '', window.location.pathname)
           }
         } catch {
-          /* fall through */
+          if (!cached && !cancelled) await loadLocation(last || DEFAULT_CITY)
+        } finally {
+          if (!cancelled) setLocating(false)
         }
-        if (!cancelled) setLocating(false)
+        return
       }
 
-      if (!cancelled) await loadLocation(DEFAULT_CITY)
+      // First launch: try quick geo, else default — never hang long
+      if ('geolocation' in navigator) {
+        setLocating(true)
+        const geoPromise = new Promise<GeolocationPosition>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(resolve, reject, {
+            enableHighAccuracy: false,
+            timeout: 4000,
+            maximumAge: 300_000,
+          })
+        })
+
+        // Race: if GPS is slow, show London (or cache) immediately
+        const timeoutFallback = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 900))
+
+        if (cached) {
+          setData(cached)
+          setLoading(false)
+        }
+
+        const raced = await Promise.race([
+          geoPromise.then((p) => ({ type: 'geo' as const, p })),
+          timeoutFallback.then(() => ({ type: 'timeout' as const })),
+        ])
+
+        if (cancelled) return
+
+        if (raced.type === 'timeout') {
+          // Don't block — load last/default, GPS can finish later
+          if (!cached) await loadLocation(DEFAULT_CITY)
+          setLocating(false)
+          try {
+            const pos = await geoPromise
+            if (cancelled) return
+            const geo = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
+            if (geo && !cancelled) await loadLocation(geo, { silent: true })
+          } catch {
+            /* ignore late GPS failure */
+          }
+          return
+        }
+
+        try {
+          const geo = await reverseGeocode(raced.p.coords.latitude, raced.p.coords.longitude)
+          if (geo && !cancelled) await loadLocation(geo, { silent: !!cached })
+          else if (!cancelled) await loadLocation(DEFAULT_CITY, { silent: !!cached })
+        } catch {
+          if (!cancelled) await loadLocation(DEFAULT_CITY, { silent: !!cached })
+        } finally {
+          if (!cancelled) setLocating(false)
+        }
+        return
+      }
+
+      if (!cancelled) await loadLocation(last || DEFAULT_CITY, { silent: !!cached })
     }
 
     void boot()
     return () => {
       cancelled = true
     }
-  }, [loadLocation])
-
-  // World strip
-  useEffect(() => {
-    let cancelled = false
-    fetchWorldSnapshot()
-      .then((list) => {
-        if (!cancelled) setWorld(list)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
-    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- boot once
   }, [])
 
-  // Temps for saved cities
+  // Defer heavy extras until main weather is up
   useEffect(() => {
-    if (saved.length === 0) {
-      setSavedTemps({})
+    if (!data) return
+    return scheduleIdle(() => setExtrasReady(true), 800)
+  }, [data])
+
+  // World strip — idle, single batched request
+  useEffect(() => {
+    if (!extrasReady) return
+    let cancelled = false
+    const cancelIdle = scheduleIdle(() => {
+      fetchWorldSnapshot()
+        .then((list) => {
+          if (!cancelled) setWorld(list)
+        })
+        .catch(() => {})
+    }, 1500)
+    return () => {
+      cancelled = true
+      cancelIdle()
+    }
+  }, [extrasReady])
+
+  // Saved city temps — lightweight current-only, deferred
+  useEffect(() => {
+    if (!extrasReady || saved.length === 0) {
+      if (saved.length === 0) setSavedTemps({})
       return
     }
     let cancelled = false
-    ;(async () => {
-      const entries = await Promise.all(
-        saved.map(async (c) => {
-          try {
-            const bundle = await fetchWeather(c)
-            return [c.id, bundle.current.temperature_2m] as const
-          } catch {
-            return [c.id, NaN] as const
-          }
-        }),
-      )
-      if (!cancelled) {
+    const cancelIdle = scheduleIdle(() => {
+      void (async () => {
         const map: Record<number, number> = {}
-        for (const [id, t] of entries) {
-          if (Number.isFinite(t)) map[id] = t
+        // Sequential small batches to avoid network stampede
+        for (let i = 0; i < saved.length; i += 3) {
+          if (cancelled) return
+          const chunk = saved.slice(i, i + 3)
+          const part = await Promise.all(
+            chunk.map(async (c) => {
+              try {
+                const s = await fetchCurrentSnapshot(c)
+                return [c.id, s.temp] as const
+              } catch {
+                return [c.id, NaN] as const
+              }
+            }),
+          )
+          for (const [id, t] of part) {
+            if (Number.isFinite(t)) map[id] = t
+          }
         }
-        setSavedTemps(map)
-      }
-    })()
+        if (!cancelled) setSavedTemps({ ...map })
+      })()
+    }, 1000)
     return () => {
       cancelled = true
+      cancelIdle()
     }
-  }, [saved])
+  }, [saved, extrasReady])
 
   const mood = useMemo(() => {
     if (!data) return 'clear-night' as const
@@ -236,12 +324,13 @@ export default function App() {
     try {
       const pos = await new Promise<GeolocationPosition>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 12000,
+          enableHighAccuracy: false,
+          timeout: 8000,
+          maximumAge: 60_000,
         })
       })
       const geo = await reverseGeocode(pos.coords.latitude, pos.coords.longitude)
-      if (geo) await loadLocation(geo)
+      if (geo) await loadLocation(geo, { silent: true })
     } catch {
       setError('Could not access your location. Check browser permissions.')
     } finally {
@@ -298,25 +387,43 @@ export default function App() {
                 {error}
               </div>
             )}
+            {refreshing && (
+              <p className="text-center text-[11px] text-white/35">Updating forecast…</p>
+            )}
 
             <Hero data={data} tempUnit={tempUnit} windUnit={windUnit} />
             <HourlyStrip data={data} tempUnit={tempUnit} />
             <div className="grid gap-5 lg:grid-cols-5">
-              <div className="lg:col-span-3">
-                <TempChart data={data} tempUnit={tempUnit} />
+              <div className="lg:col-span-3 min-h-[14rem]">
+                {extrasReady ? (
+                  <Suspense
+                    fallback={
+                      <div className="glass h-56 animate-pulse rounded-3xl sm:h-60" />
+                    }
+                  >
+                    <TempChart data={data} tempUnit={tempUnit} />
+                  </Suspense>
+                ) : (
+                  <div className="glass h-56 animate-pulse rounded-3xl sm:h-60" />
+                )}
               </div>
               <div className="lg:col-span-2">
                 <DailyForecast data={data} tempUnit={tempUnit} />
               </div>
             </div>
             <DetailGrid data={data} tempUnit={tempUnit} windUnit={windUnit} />
-            <WeatherAI data={data} tempUnit={tempUnit} windUnit={windUnit} />
-            <WorldStrip
-              cities={world}
-              tempUnit={tempUnit}
-              activeId={data.location.id}
-              onSelect={(loc) => loadLocation(loc)}
-            />
+
+            {extrasReady && (
+              <Suspense fallback={null}>
+                <WeatherAI data={data} tempUnit={tempUnit} windUnit={windUnit} />
+                <WorldStrip
+                  cities={world}
+                  tempUnit={tempUnit}
+                  activeId={data.location.id}
+                  onSelect={(loc) => loadLocation(loc)}
+                />
+              </Suspense>
+            )}
 
             <footer className="pt-6 text-center text-[11px] text-white/30">
               <p className="text-sm font-medium tracking-wide text-white/55">
