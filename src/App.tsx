@@ -333,6 +333,15 @@ export default function App() {
                   Open-Meteo
                 </a>
                 {' · '}
+                <a
+                  href={`${import.meta.env.BASE_URL}privacy.html`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-white/45 underline-offset-2 hover:text-white/70 hover:underline"
+                >
+                  Privacy Policy
+                </a>
+                {' · '}
                 Forecasts update automatically · Built with care for planet Earth
               </p>
             </footer>
